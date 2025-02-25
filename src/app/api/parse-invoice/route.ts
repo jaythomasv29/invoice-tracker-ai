@@ -1,64 +1,87 @@
 import { NextApiRequest, NextApiResponse } from "next";
-import formidable from "formidable";
 import fs from "fs";
-import path from "path";
 import { OpenAI } from "openai";
-
 export const config = { api: { bodyParser: false } };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
+export async function POST(req: Request) {
+  const data = await req.formData();
+  const file = data.get('file') as File;
+  if (!file) {
+    return new Response(JSON.stringify({ error: "No file uploaded" }), { status: 400 });
+  }
 
-  const form = formidable({
-    uploadDir: "/tmp",
-    keepExtensions: true
-  });
+  // Convert File to Buffer
+  const bytes = await file.arrayBuffer();
+  const buffer = Buffer.from(bytes);
 
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      console.error("File upload error:", err);
-      return res.status(500).json({ error: "File upload failed" });
-    }
+  // Save to temp file
+  const tmpFilePath = `/tmp/${file.name}`;
+  fs.writeFileSync(tmpFilePath, buffer);
 
-    const uploadedFile = Array.isArray(files.file) ? files.file[0] : files.file;
-    if (!uploadedFile) return res.status(400).json({ error: "No file uploaded" });
+  try {
+    // Read file as base64
+    const base64Image = buffer.toString("base64");
+
+    // Call OpenAI GPT-4 Vision API
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Please analyze this invoice and return the data in this exact JSON format:\n" +
+                "{\n" +
+                "  'vendor': 'Company Name',\n" +
+                "  'items': [\n" +
+                "    { 'description': 'item description', 'quantity': number, 'unit_price': number, 'total': number }\n" +
+                "  ],\n" +
+                "  'total_amount': number\n" +
+                "}"
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+              }
+            }
+          ],
+        },
+      ],
+      max_tokens: 1000,
+    });
+
+    // Clean up temp file
+    fs.unlinkSync(tmpFilePath);
+
+    // Parse the response
+    const textResponse = response.choices[0].message.content || '';
 
     try {
-      // Read file as a base64 string
-      const fileBuffer = fs.readFileSync(uploadedFile.filepath);
-      const base64Image = fileBuffer.toString("base64");
+      // Clean up the response by removing markdown code block markers and any extra whitespace
+      const cleanedResponse = textResponse
+        .replace(/```json\n?/g, '')  // Remove ```json
+        .replace(/```\n?/g, '')      // Remove closing ```
+        .trim();                     // Remove extra whitespace
 
-      // Call OpenAI GPT-4 Vision API
-      const response = await openai.chat.completions.create({
-        model: "gpt-4-vision-preview",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Extract the company name and total amount from this invoice." },
-              { type: "image_url", image_url: `data:image/png;base64,${base64Image}` }
-            ],
-          },
-        ],
-        max_tokens: 300,
-      });
-
-      // Extract and format data
-      const textResponse = response.choices[0].message.content;
-      const vendorMatch = textResponse.match(/Company Name:\s*(.+)/i);
-      const totalMatch = textResponse.match(/Total Amount:\s*\$?(\d+\.\d{2})/i);
-
-      const extractedData = {
-        vendor: vendorMatch ? vendorMatch[1] : "Unknown",
-        total: totalMatch ? parseFloat(totalMatch[1]) : 0,
-      };
-
-      res.status(200).json(extractedData);
-    } catch (error) {
-      console.error("OpenAI Vision error:", error);
-      res.status(500).json({ error: "Failed to process invoice" });
+      // Try to parse the JSON response directly
+      const parsedData = JSON.parse(cleanedResponse.replace(/'/g, '"'));
+      return new Response(JSON.stringify(parsedData), { status: 200 });
+    } catch (parseError) {
+      console.error("Failed to parse response:", textResponse);
+      return new Response(JSON.stringify({
+        error: "Failed to parse invoice data",
+        raw_response: textResponse
+      }), { status: 500 });
     }
-  });
+
+  } catch (error) {
+    // Clean up temp file in case of error
+    fs.unlinkSync(tmpFilePath);
+    console.error("OpenAI Vision error:", error);
+    return new Response(JSON.stringify({ error: "Failed to process invoice" }), { status: 500 });
+  }
 }
