@@ -31,7 +31,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const base64Image = fileBuffer.toString("base64");
 
       // Call OpenAI GPT-4 Vision API
-      const response = await openai.images.create({
+      const response = await openai.chat.completions.create({
         model: "gpt-4-vision-preview",
         messages: [
           {
@@ -42,10 +42,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             ],
           },
         ],
+        max_tokens: 300,
       });
 
       // Extract and format data
-      const textResponse = response.data.choices[0].message.content;
+      const textResponse = response.choices[0].message.content;
       const vendorMatch = textResponse.match(/Company Name:\s*(.+)/i);
       const totalMatch = textResponse.match(/Total Amount:\s*\$?(\d+\.\d{2})/i);
 
